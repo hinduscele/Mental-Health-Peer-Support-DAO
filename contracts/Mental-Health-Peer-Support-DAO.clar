@@ -9,6 +9,9 @@
 (define-constant ERR_PROPOSAL_NOT_PASSED (err u107))
 (define-constant ERR_ALREADY_EXECUTED (err u108))
 (define-constant ERR_INVALID_AMOUNT (err u109))
+(define-constant REPUTATION_CONTRIBUTION_POINTS u10)
+(define-constant REPUTATION_PROPOSAL_POINTS u25)
+(define-constant REPUTATION_VOTE_POINTS u5)
 
 (define-data-var next-proposal-id uint u1)
 (define-data-var total-members uint u0)
@@ -206,4 +209,95 @@
       votes-against: u0
     }
   )
+)
+
+
+
+(define-map member-reputation principal uint)
+
+(define-private (award-reputation (member principal) (points uint))
+  (map-set member-reputation 
+    member 
+    (+ (default-to u0 (map-get? member-reputation member)) points)
+  )
+)
+
+(define-public (contribute-with-reputation (amount uint))
+  (let ((caller tx-sender))
+    (asserts! (is-some (map-get? members caller)) ERR_NOT_MEMBER)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (try! (stx-transfer? amount caller (as-contract tx-sender)))
+    (var-set treasury-balance (+ (var-get treasury-balance) amount))
+    (map-set member-contributions 
+      caller 
+      (+ (default-to u0 (map-get? member-contributions caller)) amount)
+    )
+    (award-reputation caller (/ amount u100000))
+    (award-reputation caller REPUTATION_CONTRIBUTION_POINTS)
+    (ok true)
+  )
+)
+
+(define-public (create-proposal-with-reputation 
+  (recipient principal)
+  (amount uint)
+  (title (string-ascii 100))
+  (description (string-ascii 500))
+)
+  (let (
+    (caller tx-sender)
+    (proposal-id (var-get next-proposal-id))
+    (voting-period u144)
+  )
+    (asserts! (is-some (map-get? members caller)) ERR_NOT_MEMBER)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (<= amount (var-get treasury-balance)) ERR_INSUFFICIENT_FUNDS)
+    
+    (map-set proposals proposal-id {
+      proposer: caller,
+      recipient: recipient,
+      amount: amount,
+      title: title,
+      description: description,
+      votes-for: u0,
+      votes-against: u0,
+      voting-end-height: (+ stacks-block-height voting-period),
+      executed: false,
+      created-at: stacks-block-height
+    })
+    
+    (var-set next-proposal-id (+ proposal-id u1))
+    (award-reputation caller REPUTATION_PROPOSAL_POINTS)
+    (ok proposal-id)
+  )
+)
+
+(define-public (vote-with-reputation (proposal-id uint) (vote-for bool))
+  (let (
+    (caller tx-sender)
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+    (vote-key { proposal-id: proposal-id, voter: caller })
+    (existing-vote (map-get? proposal-votes vote-key))
+  )
+    (asserts! (is-some (map-get? members caller)) ERR_NOT_MEMBER)
+    (asserts! (< stacks-block-height (get voting-end-height proposal)) ERR_VOTING_ENDED)
+    (asserts! (is-none existing-vote) ERR_ALREADY_VOTED)
+    
+    (map-set proposal-votes vote-key { vote: vote-for, voted: true })
+    
+    (if vote-for
+      (map-set proposals proposal-id 
+        (merge proposal { votes-for: (+ (get votes-for proposal) u1) })
+      )
+      (map-set proposals proposal-id 
+        (merge proposal { votes-against: (+ (get votes-against proposal) u1) })
+      )
+    )
+    (award-reputation caller REPUTATION_VOTE_POINTS)
+    (ok true)
+  )
+)
+
+(define-read-only (get-member-reputation (member principal))
+  (default-to u0 (map-get? member-reputation member))
 )
