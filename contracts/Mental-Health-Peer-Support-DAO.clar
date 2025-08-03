@@ -13,6 +13,12 @@
 (define-constant REPUTATION_PROPOSAL_POINTS u25)
 (define-constant REPUTATION_VOTE_POINTS u5)
 
+(define-constant ACTIVITY_DECAY_PERIOD u1008)
+(define-constant ACTIVITY_CONTRIBUTION_WEIGHT u3)
+(define-constant ACTIVITY_PROPOSAL_WEIGHT u5)
+(define-constant ACTIVITY_VOTE_WEIGHT u2)
+(define-constant ACTIVITY_JOIN_WEIGHT u1)
+
 (define-data-var next-proposal-id uint u1)
 (define-data-var total-members uint u0)
 (define-data-var treasury-balance uint u0)
@@ -300,4 +306,60 @@
 
 (define-read-only (get-member-reputation (member principal))
   (default-to u0 (map-get? member-reputation member))
+)
+
+
+(define-map member-last-activity principal uint)
+(define-map member-activity-score principal uint)
+(define-map member-activity-history principal { contributions: uint, proposals: uint, votes: uint, last-updated: uint })
+
+(define-private (update-member-activity (member principal) (activity-type (string-ascii 20)))
+  (let (
+    (current-height stacks-block-height)
+    (last-activity (default-to u0 (map-get? member-last-activity member)))
+    (current-score (default-to u0 (map-get? member-activity-score member)))
+    (history (default-to { contributions: u0, proposals: u0, votes: u0, last-updated: u0 } 
+             (map-get? member-activity-history member)))
+    (time-diff (- current-height last-activity))
+    (decay-factor (if (> time-diff ACTIVITY_DECAY_PERIOD) u2 u1))
+    (activity-points (if (is-eq activity-type "join") ACTIVITY_JOIN_WEIGHT
+                     (if (is-eq activity-type "contribute") ACTIVITY_CONTRIBUTION_WEIGHT
+                     (if (is-eq activity-type "propose") ACTIVITY_PROPOSAL_WEIGHT
+                     (if (is-eq activity-type "vote") ACTIVITY_VOTE_WEIGHT u0)))))
+    (decayed-score (/ current-score decay-factor))
+    (new-score (+ decayed-score activity-points))
+    (updated-history (if (is-eq activity-type "contribute")
+                      (merge history { contributions: (+ (get contributions history) u1), last-updated: current-height })
+                      (if (is-eq activity-type "propose")
+                       (merge history { proposals: (+ (get proposals history) u1), last-updated: current-height })
+                       (if (is-eq activity-type "vote")
+                        (merge history { votes: (+ (get votes history) u1), last-updated: current-height })
+                        (merge history { last-updated: current-height })))))
+  )
+    (map-set member-last-activity member current-height)
+    (map-set member-activity-score member new-score)
+    (map-set member-activity-history member updated-history)
+    new-score
+  )
+)
+
+(define-read-only (get-member-activity-score (member principal))
+  (let (
+    (current-height stacks-block-height)
+    (last-activity (default-to u0 (map-get? member-last-activity member)))
+    (current-score (default-to u0 (map-get? member-activity-score member)))
+    (time-diff (- current-height last-activity))
+    (decay-factor (if (> time-diff ACTIVITY_DECAY_PERIOD) u2 u1))
+  )
+    (/ current-score decay-factor)
+  )
+)
+
+(define-read-only (get-member-activity-history (member principal))
+  (default-to { contributions: u0, proposals: u0, votes: u0, last-updated: u0 } 
+             (map-get? member-activity-history member))
+)
+
+(define-read-only (get-active-members-count)
+  (var-get total-members)
 )
