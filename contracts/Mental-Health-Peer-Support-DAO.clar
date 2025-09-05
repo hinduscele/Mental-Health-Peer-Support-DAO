@@ -19,6 +19,14 @@
 (define-constant ACTIVITY_VOTE_WEIGHT u2)
 (define-constant ACTIVITY_JOIN_WEIGHT u1)
 
+(define-constant ERR_SELF_ENDORSEMENT (err u201))
+(define-constant ERR_ALREADY_ENDORSED (err u202))
+(define-constant ERR_ENDORSEMENT_NOT_FOUND (err u203))
+(define-constant MAX_ENDORSEMENT_TEXT u200)
+
+(define-data-var next-endorsement-id uint u1)
+
+
 (define-data-var next-proposal-id uint u1)
 (define-data-var total-members uint u0)
 (define-data-var treasury-balance uint u0)
@@ -362,4 +370,103 @@
 
 (define-read-only (get-active-members-count)
   (var-get total-members)
+)
+
+(define-map endorsements
+  uint
+  {
+    endorser: principal,
+    endorsed: principal,
+    category: (string-ascii 20),
+    message: (string-ascii 200),
+    created-at: uint
+  }
+)
+
+(define-map member-endorsements
+  { endorser: principal, endorsed: principal }
+  bool
+)
+
+(define-map endorsement-counts
+  principal
+  { received: uint, given: uint }
+)
+
+(define-map endorsement-categories
+  principal
+  { support: uint, guidance: uint, empathy: uint, leadership: uint }
+)
+
+(define-public (endorse-member 
+  (endorsed-member principal)
+  (category (string-ascii 20))
+  (message (string-ascii 200))
+)
+  (let (
+    (endorser tx-sender)
+    (endorsement-id (var-get next-endorsement-id))
+    (endorsement-key { endorser: endorser, endorsed: endorsed-member })
+  )
+    (asserts! (not (is-eq endorser endorsed-member)) ERR_SELF_ENDORSEMENT)
+    (asserts! (is-none (map-get? member-endorsements endorsement-key)) ERR_ALREADY_ENDORSED)
+    
+    (map-set endorsements endorsement-id {
+      endorser: endorser,
+      endorsed: endorsed-member,
+      category: category,
+      message: message,
+      created-at: stacks-block-height
+    })
+    
+    (map-set member-endorsements endorsement-key true)
+    (var-set next-endorsement-id (+ endorsement-id u1))
+    
+    (update-endorsement-counts endorsed-member endorser category)
+    (ok endorsement-id)
+  )
+)
+
+(define-private (update-endorsement-counts (endorsed principal) (endorser principal) (category (string-ascii 20)))
+  (let (
+    (endorsed-counts (default-to { received: u0, given: u0 } (map-get? endorsement-counts endorsed)))
+    (endorser-counts (default-to { received: u0, given: u0 } (map-get? endorsement-counts endorser)))
+    (endorsed-categories (default-to { support: u0, guidance: u0, empathy: u0, leadership: u0 } 
+                         (map-get? endorsement-categories endorsed)))
+  )
+    (map-set endorsement-counts endorsed 
+      (merge endorsed-counts { received: (+ (get received endorsed-counts) u1) }))
+    (map-set endorsement-counts endorser 
+      (merge endorser-counts { given: (+ (get given endorser-counts) u1) }))
+    
+    (map-set endorsement-categories endorsed
+      (if (is-eq category "support")
+        (merge endorsed-categories { support: (+ (get support endorsed-categories) u1) })
+        (if (is-eq category "guidance")
+          (merge endorsed-categories { guidance: (+ (get guidance endorsed-categories) u1) })
+          (if (is-eq category "empathy")
+            (merge endorsed-categories { empathy: (+ (get empathy endorsed-categories) u1) })
+            (merge endorsed-categories { leadership: (+ (get leadership endorsed-categories) u1) })))))
+  )
+)
+
+(define-read-only (get-endorsement (endorsement-id uint))
+  (map-get? endorsements endorsement-id)
+)
+
+(define-read-only (get-member-endorsement-counts (member principal))
+  (default-to { received: u0, given: u0 } (map-get? endorsement-counts member))
+)
+
+(define-read-only (get-member-category-endorsements (member principal))
+  (default-to { support: u0, guidance: u0, empathy: u0, leadership: u0 } 
+             (map-get? endorsement-categories member))
+)
+
+(define-read-only (has-endorsed (endorser principal) (endorsed principal))
+  (default-to false (map-get? member-endorsements { endorser: endorser, endorsed: endorsed }))
+)
+
+(define-read-only (get-next-endorsement-id)
+  (var-get next-endorsement-id)
 )
