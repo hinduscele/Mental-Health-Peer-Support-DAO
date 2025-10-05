@@ -24,6 +24,11 @@
 (define-constant ERR_ENDORSEMENT_NOT_FOUND (err u203))
 (define-constant MAX_ENDORSEMENT_TEXT u200)
 
+(define-constant ERR_INSUFFICIENT_CREDITS (err u301))
+(define-constant ERR_INVALID_CREDITS (err u302))
+(define-constant BASE_VOTE_CREDITS u100)
+(define-constant REPUTATION_CREDIT_MULTIPLIER u10)
+
 (define-data-var next-endorsement-id uint u1)
 
 
@@ -469,4 +474,64 @@
 
 (define-read-only (get-next-endorsement-id)
   (var-get next-endorsement-id)
+)
+
+
+(define-map quadratic-vote-credits
+  { proposal-id: uint, voter: principal }
+  { credits-spent: uint, vote-weight: uint, vote-direction: bool }
+)
+
+(define-public (quadratic-vote (proposal-id uint) (credits uint) (vote-for bool))
+  (let (
+    (caller tx-sender)
+    (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+    (vote-key { proposal-id: proposal-id, voter: caller })
+    (existing-qv (map-get? quadratic-vote-credits vote-key))
+    (existing-vote (map-get? proposal-votes vote-key))
+    (reputation (get-member-reputation caller))
+    (max-credits (+ BASE_VOTE_CREDITS (/ (* reputation REPUTATION_CREDIT_MULTIPLIER) u10)))
+    (vote-weight (sqrti credits))
+  )
+    (asserts! (is-some (map-get? members caller)) ERR_NOT_MEMBER)
+    (asserts! (< stacks-block-height (get voting-end-height proposal)) ERR_VOTING_ENDED)
+    (asserts! (is-none existing-qv) ERR_ALREADY_VOTED)
+    (asserts! (is-none existing-vote) ERR_ALREADY_VOTED)
+    (asserts! (> credits u0) ERR_INVALID_CREDITS)
+    (asserts! (<= credits max-credits) ERR_INSUFFICIENT_CREDITS)
+    
+    (map-set quadratic-vote-credits vote-key {
+      credits-spent: credits,
+      vote-weight: vote-weight,
+      vote-direction: vote-for
+    })
+    
+    (map-set proposal-votes vote-key { vote: vote-for, voted: true })
+    
+    (if vote-for
+      (map-set proposals proposal-id 
+        (merge proposal { votes-for: (+ (get votes-for proposal) vote-weight) })
+      )
+      (map-set proposals proposal-id 
+        (merge proposal { votes-against: (+ (get votes-against proposal) vote-weight) })
+      )
+    )
+    (ok vote-weight)
+  )
+)
+
+(define-read-only (get-available-vote-credits (member principal))
+  (let (
+    (reputation (get-member-reputation member))
+  )
+    (+ BASE_VOTE_CREDITS (/ (* reputation REPUTATION_CREDIT_MULTIPLIER) u10))
+  )
+)
+
+(define-read-only (get-quadratic-vote-info (proposal-id uint) (voter principal))
+  (map-get? quadratic-vote-credits { proposal-id: proposal-id, voter: voter })
+)
+
+(define-read-only (calculate-vote-weight (credits uint))
+  (sqrti credits)
 )
