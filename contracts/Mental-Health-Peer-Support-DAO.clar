@@ -29,6 +29,14 @@
 (define-constant BASE_VOTE_CREDITS u100)
 (define-constant REPUTATION_CREDIT_MULTIPLIER u10)
 
+(define-constant ERR_INVALID_MILESTONES (err u401))
+(define-constant ERR_MILESTONE_NOT_FOUND (err u402))
+(define-constant ERR_MILESTONE_COMPLETED (err u403))
+(define-constant ERR_NOT_VALIDATOR (err u404))
+(define-constant ERR_INVALID_MILESTONE_INDEX (err u405))
+
+(define-data-var next-milestone-proposal-id uint u1)
+
 (define-data-var next-endorsement-id uint u1)
 
 
@@ -534,4 +542,105 @@
 
 (define-read-only (calculate-vote-weight (credits uint))
   (sqrti credits)
+)
+
+
+(define-map milestone-proposals
+  uint
+  {
+    proposer: principal,
+    recipient: principal,
+    total-amount: uint,
+    title: (string-ascii 100),
+    milestone-count: uint,
+    completed-milestones: uint,
+    current-released: uint,
+    created-at: uint,
+    active: bool
+  }
+)
+
+(define-map milestones
+  { proposal-id: uint, milestone-index: uint }
+  {
+    description: (string-ascii 300),
+    amount: uint,
+    completed: bool,
+    validator: principal,
+    verified-at: uint
+  }
+)
+
+(define-public (create-milestone-proposal
+  (recipient principal)
+  (title (string-ascii 100))
+  (milestone-descriptions (list 5 (string-ascii 300)))
+  (milestone-amounts (list 5 uint))
+)
+  (let (
+    (caller tx-sender)
+    (proposal-id (var-get next-milestone-proposal-id))
+    (milestone-count (len milestone-descriptions))
+    (total-amount (fold + milestone-amounts u0))
+  )
+    (asserts! (is-some (map-get? members caller)) ERR_NOT_MEMBER)
+    (asserts! (> milestone-count u0) ERR_INVALID_MILESTONES)
+    (asserts! (is-eq (len milestone-amounts) milestone-count) ERR_INVALID_MILESTONES)
+    (asserts! (<= total-amount (var-get treasury-balance)) ERR_INSUFFICIENT_FUNDS)
+    
+    (map-set milestone-proposals proposal-id {
+      proposer: caller,
+      recipient: recipient,
+      total-amount: total-amount,
+      title: title,
+      milestone-count: milestone-count,
+      completed-milestones: u0,
+      current-released: u0,
+      created-at: stacks-block-height,
+      active: true
+    })
+    
+    (var-set next-milestone-proposal-id (+ proposal-id u1))
+    (ok proposal-id)
+  )
+)
+
+(define-public (verify-milestone (proposal-id uint) (milestone-index uint))
+  (let (
+    (caller tx-sender)
+    (proposal (unwrap! (map-get? milestone-proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+    (milestone-key { proposal-id: proposal-id, milestone-index: milestone-index })
+    (milestone (unwrap! (map-get? milestones milestone-key) ERR_MILESTONE_NOT_FOUND))
+  )
+    (asserts! (is-some (map-get? members caller)) ERR_NOT_MEMBER)
+    (asserts! (get active proposal) ERR_PROPOSAL_NOT_FOUND)
+    (asserts! (not (get completed milestone)) ERR_MILESTONE_COMPLETED)
+    
+    (map-set milestones milestone-key
+      (merge milestone { completed: true, validator: caller, verified-at: stacks-block-height })
+    )
+    
+    (try! (as-contract (stx-transfer? (get amount milestone) tx-sender (get recipient proposal))))
+    
+    (let ((new-completed (+ (get completed-milestones proposal) u1))
+          (new-released (+ (get current-released proposal) (get amount milestone))))
+      (map-set milestone-proposals proposal-id
+        (merge proposal {
+          completed-milestones: new-completed,
+          current-released: new-released,
+          active: (< new-completed (get milestone-count proposal))
+        })
+      )
+      (var-set treasury-balance (- (var-get treasury-balance) (get amount milestone)))
+      (ok true)
+    )
+  )
+)
+
+(define-read-only (get-milestone-proposal (proposal-id uint))
+  (map-get? milestone-proposals proposal-id)
+)
+
+(define-read-only (get-milestone (proposal-id uint) (milestone-index uint))
+  (map-get? milestones { proposal-id: proposal-id, milestone-index: milestone-index })
 )
